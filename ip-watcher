@@ -1,0 +1,589 @@
+#!/usr/bin/perl -w
+
+use strict;
+use warnings;
+
+use Getopt::Long;
+use Mail::Mailer;
+use Sys::Syslog;
+use Sys::Hostname;
+use Config;
+
+# Global variables
+my $g_syslog_open = undef;                               # Whether or not we ended up opening up the syslog facility.
+my $g_cmdoptions = { 'ip-address'    => undef,           # IP address to ping.
+                       'mail-to'       => undef,         # Email address to mail on state changes.
+                       'mail-from'     => "ip-watcher",  # Mail From: header address.
+                       'sleep-secs'    => 5,             # Number of seconds to sleep between pings.
+                       'email-delay'   => 5,             # Number of consecutive detections to wait until we notify mail-to.
+                       'daemonize'     => 1,             # To daemonize or not -- if not, do everything in the foreground.
+                       'log-to-syslog' => 1,             # Log to the syslog facility or not.
+                       'ping'          => undef };       # Location of the ping binary.
+
+# Call main explicitly since perl doesn't have a magic entry point.
+main();
+
+# Quick convenience function to log either to STDOUT/STDERR, or to log
+# directly to the syslog facility through Sys::Syslog, depending on
+# the value of $g_cmdoptions->{'log-to-syslog'} and
+# $g_cmdoptions->{'daemonize'}.
+#
+# @param string The syslog priority to log at.
+# @param string The line to log.
+# @returns void
+sub logIt {
+  my $priority = shift;
+  my $logline = shift;
+
+  if ($g_cmdoptions->{'daemonize'} && $g_cmdoptions->{'log-to-syslog'}) {
+    # If we've been asked to daemonize and log to syslog, then log there.
+
+    # Open syslog if we haven't before.
+    if (!$g_syslog_open) {
+      openlog("ip-watcher", "pid", "daemon");
+      $g_syslog_open = 1;
+    }
+
+    # Log the message.
+    syslog($priority, $logline);
+  } else {
+    # We don't want syslogging or we've been told to not daemonize, so
+    # log to STDERR/OUT instead.
+    my $logline = "<$priority> ip-watcher[$$]: $logline\n";
+
+    if (($priority eq "emerg") && ($priority >= "err")) {
+      printf(STDERR $logline);
+    } else {
+      printf(STDOUT $logline);
+    }
+  }
+}
+
+# Subroutine to find the ping binary. Runs through the path if it
+# wasn't specified on the command line to find ping. Otherwise, it
+# just validates that the path given to ping is valid, and that it's
+# runnable. Returns 1 if ping was found successfully, or undef if it
+# can't be found. Does not work on non-POSIX systems.
+#
+# @returns mixed 1 if found, undef if not.
+sub findPing {
+  if (!$g_cmdoptions->{'ping'}) {
+    # No ping specified -- search for it. =o)
+
+    foreach my $path (split(/:/, $ENV{'PATH'})) {
+      my $fullname;
+
+      # Catch the corner case where a path element ends in a /
+      if ($path =~ /\/$/) {
+        $fullname = $path . "ping";
+      } else {
+        $fullname = $path ."/ping";
+      }
+
+      # Check to make sure if this path is valid
+      if (-x $fullname) {
+        $g_cmdoptions->{'ping'} = $fullname;
+        return 1;
+      }
+    }
+
+    # If we make it here, we couldn't find ping, so return undef.
+    return undef;
+  } else {
+    # Ping was specified on the command line -- validate it's
+    # existance.
+
+    if (-x $g_cmdoptions->{'ping'}) {
+      return 1;
+    } else {
+      return undef;
+    }
+  }
+}
+
+# Convenience function to display a quick usage statement to the
+# user when an argument was passed incorrectly, or the user specified
+# --help on the command line. Takes no arguments, returns void.
+#
+# @returns void
+sub showUsage {
+  print <<EOF
+Usage: ip-watcher <options> <ip-address> <email-address>
+
+  Where <options> is one of the following:
+
+      --help
+        Show this help
+
+      --mail-from=<email-address>
+        Set the email address for the From: headers for all notifications.
+        Defaults to ip-watcher.
+
+      --sleep-secs=<num>
+        Set the number of seconds to sleep between ping checks. Defaults
+        to 5.
+
+      --email-delay=<num>
+        Set the number of failed/successful checks to wait for until
+        ip-watcher sends a notification email. Used to guard against
+        flapping conditions. Default is 5.
+
+      --daemonize
+      --no-daemonize
+        Toggle whether ip-watcher should fork into the background. Default
+        is to daemonize.
+
+      --syslogging
+      --no-syslogging
+        Toggle whether or not ip-watcher should log it's output to the
+        syslog or to stdout instead. Defaults to syslogging.
+
+      --ping=<filename>
+        The fully qualified pathname to the ping utility. If this is not
+        specified, ip-watcher will attempt to guess at where ping is by
+        scanning the PATH environment variable. Note that this program must
+        be executable by the user ip-watcher runs as, and must accept the
+        -c command line parameter (count).
+
+  <ip-address> is the IP or hostname to watch.
+  <email-address> is the email address to send notifications to.
+
+  When daemonized, sending a SIGINT, SIGQUIT, SIGABRT, or SIGTERM to the
+  process will cause it to clean up it's work, notify the email-address of
+  it's termination and shut down. A SIGKILL, on the other hand, will cause
+  the script to immediately exit without notification to the user. This was
+  intentional, as SIGKILL is supposedly the "uncatchable signal" and is
+  intended mostly for use in emergency situations. As such, we can't rely
+  on the state of the mail system.
+EOF
+}
+
+# Subroutine to parse the command line arguments, do some validation,
+# and prepare the global variables with suitable values. Takes no
+# arguments and returns void.
+#
+# @returns void
+sub parseCommandLine {
+  my $show_help = 0;
+  my $results = GetOptions("help" => \$show_help,
+                           "mail-from=s" => \$g_cmdoptions->{'mail-from'},
+                           "sleep-secs=i" => \$g_cmdoptions->{'sleep-secs'},
+                           "email-delay=i" => \$g_cmdoptions->{'email-delay'},
+                           "daemonize!" => \$g_cmdoptions->{'daemonize'},
+                           "syslogging!" => \$g_cmdoptions->{'log-to-syslog'},
+                           "ping=s" => \$g_cmdoptions->{'ping'});
+
+  if (!$results) {
+    print(STDERR "Unable to parse command line options.\n");
+    showUsage();
+    exit(1);
+  }
+
+  if ($show_help) {
+    showUsage();
+    exit(0);
+  }
+
+  # Expect the mandatory arguments to be the ip to ping, followed by
+  # the email to deliver notifications to.
+  $g_cmdoptions->{'ip-address'} = shift(@ARGV);
+  $g_cmdoptions->{'mail-to'} = shift(@ARGV);
+
+  # Validate that the ip address was given.
+  if (!$g_cmdoptions->{'ip-address'}) {
+    print(STDERR "No IP address specified on command line. Use --help for more information.\n");
+    exit(1);
+  }
+
+  # Validate that the email address to notify was given as well.
+  if (!$g_cmdoptions->{'mail-to'}) {
+    print(STDERR "No email address to notify specified on command line. Use --help for more information.\n");
+    exit(1);
+  }
+
+  # Find a suitable ping program
+  if (!findPing()) {
+    if (!$g_cmdoptions->{'ping'}) {
+      print(STDERR "Unable to locate ping binary in your path -- try supplying --ping on the command line.\n");
+    } else {
+      print(STDERR "The specified ping path (". $g_cmdoptions->{'ping'} .") does not exist or is not executable.\n");
+    }
+
+    exit(1);
+  }
+}
+
+# Subroutine to daemonize the program into the background and
+# successfully remove STDIN and STDOUT from it's linkages, thus
+# allowing the parent shell to exit properly. Takes no arguments,
+# returns void.
+#
+# @returns void
+sub daemonize {
+  my $pid;
+
+  logIt("debug", "Daemonizing...");
+  $pid = fork();
+
+  if ($pid > 0) {
+    # We're the parent -- die off
+    logIt("debug", "First parent process exiting.");
+    exit(0);
+  } elsif ($pid == 0) {
+    # We're the child -- fork again to get rid of stdin and stdout
+    $pid = fork();
+
+    if ($pid > 0) {
+      # We're the parent -- die off
+      logIt("debug", "Second parent process exiting.");
+      exit(0);
+    } elsif ($pid == 0) {
+      # We're the child -- return successfully.
+      logIt("debug", "Daemonized into pid $$");
+    } else {
+      # Forking failed -- throw an error
+      logIt("err", "Unable to daemonize: $!");
+      exit(1);
+    }
+  } else {
+    # Forking failed -- throw an error
+    logIt("err", "Unable to daemonize: $!");
+    exit(1);
+  }
+}
+
+# Routine to handle a sudden-death signal (KILL, TERM, and INT),
+# notify the user of the shutdown, and close the syslog (if it was
+# open in the first place). Takes one argument: the signal name, which
+# is passed to us from Perl's signal handling routines. Returns void.
+#
+# @param string The signal name that was passed to us from perl.
+# @returns void
+sub shutdownHandler {
+  my $signal = shift;
+  my $hostname = hostname();
+  my $mailer = new Mail::Mailer();
+
+  logIt("notice", "Recieved signal to quit (SIG$signal)");
+
+  logIt("debug", "Notifying user of shutdown");
+  $mailer->open({ "To" => $g_cmdoptions->{'mail-to'},
+                  "From" => $g_cmdoptions->{'mail-from'},
+                  "Subject" => "ip-watcher[$$] on host $hostname shutting down"});
+  print($mailer "ip-watcher PID $$ on host $hostname shutting down due to a SIG$signal.");
+  $mailer->close();
+
+  logIt("debug", "Cleaning up and shutting down");
+  if ($g_syslog_open) { closelog(); }
+
+  exit(0);
+}
+
+# Routine to handle an emergency shutdown signal (SIGKILL). This is a
+# simplified version of shutdownHandler that does not send a
+# notification to the user, as a SIGKILL signal usually means that the
+# system is going down, so we can't rely on the state of the mail
+# services, and we _really_ don't want to wait more than a few seconds
+# to shut down. As a result, this routine just closes the syslog service.
+#
+# @param string The signal name that was passed to us from perl (SIGKILL).
+# @returns void
+sub quickShutdownhandler {
+  my $signal = shift;
+
+  logIt("notice", "Recieved signal to kill (SIG$signal)");
+  logIt("notice", "Exiting immediately");
+  if ($g_syslog_open) { closelog(); }
+
+  exit(0);
+}
+
+# Routine to call the ping binary and log it's results. If any part of
+# this program needs to be refactored, this is likely it. The system()
+# call used here actually is passed to the command line shell, which
+# happens to be horribly non-portable, even on POSIX systems. The only
+# other solution I can think of is to implement PING in perl itself,
+# but that is a massive task I simply do not have time for at the
+# moment. In the meantime, this will have to function. Takes no
+# arguments, and returns the exit code of the ping binary. Expects the
+# ping binary to take the count command line argument (-c 1).
+#
+# Major bugs here are that if we are inside the system() call, no
+# signals will be caught and instead are dropped onto the floor. Could
+# possibly be refactored a little to do some proper fork()ing and
+# waitpid() calls to handle signals better, but for this
+# non-mission-critical program, it works well enough.
+#
+# @returns integer The exit code of the ping binary.
+sub pingCheck {
+  system($g_cmdoptions->{'ping'} ." -c 1 ". $g_cmdoptions->{'ip-address'}. ">/dev/null");
+
+  if ($? == -1) {
+    # System call failed because we couldn't execute the binary for
+    # some reason.
+
+    logIt("err", "failed to execute ping: $!");
+    logIt("err", "Unable to continue -- exiting");
+    exit(1);
+  } elsif ($? & 127) {
+    # For some reason, our child died from a signal and (possibly)
+    # coredumped.
+
+    logIt("err", "ping child died with signal ". ($? & 127) ." ". (($? & 128) ? "with" : "without") ." coredump");
+    logIt("err", "Unable to continue -- exiting");
+    exit(1);
+  } else {
+    # The call succeeded, return the exit code to the previous caller.
+
+    return $? >> 8;
+  }
+}
+
+# Mainline routine to handle the ping loop, state changes and
+# notifications. Could possibly be refactored a little in here, but
+# handles itself quite well as is. Currently this routine parses the
+# comand line, daemonizes (if needed), sets up the signal handlers,
+# and enters the ping loop, where it actually does the heavy lifting.
+#
+# @returns void
+sub main {
+  my $ping_count = 0;
+  my $host_is_up = 0;
+  my $hostname = hostname();
+
+  parseCommandLine();
+
+  if ($g_cmdoptions->{'daemonize'}) {
+    daemonize();
+    print(STDOUT "ip-watcher running as pid $$\n");
+  }
+
+  logIt("debug", "Setting signal handlers.");
+  $SIG{'INT'} = "shutdownHandler";
+  $SIG{'QUIT'} = "shutdownHandler";
+  $SIG{'ABRT'} = "shutdownHandler";
+  $SIG{'TERM'} = "shutdownHandler";
+
+  # Noncatchable? Naah. But we need to quit without notification for
+  # this signal, since it's an emergency shutdown signal often used by
+  # killall9 to shut a computer system down, so we can't rely on the
+  # mail system to be up -- gotta quit fast!
+  $SIG{'KILL'} = "quickShutdownHandler";
+
+  logIt("debug", "Starting ping loop.");
+
+  # Loop forever here until we get a signal
+  while (1) {
+    my $result = pingCheck();
+
+    if ($host_is_up) {
+      if ($result != 0) {
+        # Host /was/ up, but is now down -- set our state accordingly
+        # and reset the ping_count to 1.
+
+        $host_is_up = 0;
+        $ping_count = 1;
+      } else {
+        # Host still is up, so increment our ping_count and notify if
+        # our flap limit was reached.
+
+        $ping_count++;
+        logIt("debug", "Host is up $ping_count times");
+
+        if ($ping_count == $g_cmdoptions->{'email-delay'}) {
+          logIt("notice", "Flap limit reached -- notifying user of state change to UP.");
+
+          my $mailer = new Mail::Mailer();
+          $mailer->open({ "To" => $g_cmdoptions->{'mail-to'},
+                          "From" => $g_cmdoptions->{'mail-from'},
+                          "Subject" => "ip-watcher[$$] on host $hostname: HOST UP ALERT"});
+          print($mailer "ip-watcher PID $$ on host $hostname has detected that ". $g_cmdoptions->{'ip-address'} ." is UP after $ping_count tries.");
+          $mailer->close();
+        }
+      }
+    } else {
+      if ($result == 0) {
+        # Host /was/ down, but is now up -- set our state accordingly
+        # and reset the ping_count to 1.
+
+        $host_is_up = 1;
+        $ping_count = 1;
+      } else {
+        # Host is still down, so increment our ping_count and notify
+        # if our flap limit was reached.
+
+        $ping_count++;
+        logIt("debug", "Host is down $ping_count times");
+
+        if ($ping_count == $g_cmdoptions->{'email-delay'}) {
+          logIt("notice", "Flap limit reached -- notifying user of state change to DOWN.");
+
+          my $mailer = new Mail::Mailer();
+          $mailer->open({ "To" => $g_cmdoptions->{'mail-to'},
+                          "From" => $g_cmdoptions->{'mail-from'},
+                          "Subject" => "ip-watcher[$$] on host $hostname: HOST DOWN ALERT"});
+          print($mailer "ip-watcher PID $$ on host $hostname has detected that ". $g_cmdoptions->{'ip-address'} ." is DOWN after $ping_count tries.");
+          $mailer->close();
+        }
+      }
+    }
+
+    # Sleep until the cows come home. =o)
+    sleep($g_cmdoptions->{'sleep-secs'});
+  }
+
+  # Nothing to see here -- move along. =o)
+}
+
+=pod
+
+=head1 NAME
+
+ip-watcher - watch the status of an IP address and notify the user of it's status.
+
+=head1 SYNOPSIS
+
+ip-watcher <options> <ip-address> <email-address>
+
+See below for more information on the various switches available.
+
+=head1 USAGE
+
+ # Typical usage -- watch 127.0.0.1 and notify jbraum@music.org
+ $ ip-watcher 127.0.0.1 jbraum@music.org
+
+=head1 DESCRIPTION
+
+This script will watch the status of an IP address and notify the user
+when it has gone up or down. ip-watcher can be configured to notify
+the user when the IP address to monitor has been down or up for N
+number of checks. Additionally, this script is designed to be run as a
+daemon. As such, it will automatically fork into the background and
+monitor things from there.
+
+ip-watcher is also designed to log messages to the daemon syslog
+facility, thus freeing up your terminal from the messages it would
+otherwise spew all over.
+
+To shutdown ip-watcher from the daemonized state, simply send a kill
+signal of SIGINT, SIGQUIT, SIGABRT, or SIGTERM. Please refrain from
+using SIGKILL, as this is usually reserved for emergency system
+functions, or shutdown needs and will not notify the user when it is
+being shut down.
+
+=head1 OPTIONS
+
+=over 4
+
+=item --help
+
+Show a quick bit of usage help.
+
+=item --mail-from=<email-address>
+
+Set the email address for the From: headers for all notifications. If
+this is not specified on the command line, it defaults to
+"ip-watcher".
+
+=item --sleep-secs=<num>
+
+Set the amount of time to sleep between ping checks. The default when
+this is not specified is 5 seconds. NOTE: don't set this to 0 or
+you'll be very sorry. :)
+
+=item --email-delay=<num>
+
+Set the number of consecutive times that a ping must succeed or fail
+before the user is notified of the state change. This is useful as it
+helps to prevent "flapping" of notifications when a server is going a
+bit nutty. Note that setting this value too high can cause ip-watcher
+to not detect a true failure, and setting it too low can annoy the
+heck out of the owner of the email address. Defaults to a reasonable
+5.
+
+=item --daemonize
+
+=item --no-daemonize
+
+Toggle whether ip-watcher should fork into the background. The default
+is to go ahead and daemonize. Note that specifying --no-daemonize on
+the command line will result in all log messages going to the
+terminal, as logging all that cruft to syslog while running in the
+foreground is mostly pointless.
+
+=item --syslogging
+
+=item --no-syslogging
+
+Toggle whether or not ip-watcher should log it's output to the syslog
+or to stdout instead. This allows you to have ip-watcher running as a
+daemon and yet still output log messages to your terminal if you need
+to debug something. Mostly useful to developers only. Defaults to
+syslogging, unless --no-daemonize is specified, which implies
+--no-syslogging.
+
+=item --ping=<filename>
+
+The fully qualified pathname to the ping utility. If this is not
+specified, ip-watcher will attempt to guess at where ping is by
+scanning the PATH environment variable. Note that this program must be
+executable by the user ip-watcher runs as, and must accept the -c
+command line parameter (count).
+
+=back
+
+=head1 COPYRIGHT
+
+Copyright(C) 2006, June R. Tate-Gans <june@theonelab.com>
+
+=head1 LICENSE
+
+This file is a part of ip-watcher.
+
+ip-watcher is free software; you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published
+by the Free Software Foundation; either version 2 of the License,
+or (at your option) any later version.
+
+ip-watcher is distributed in the hope that it will be useful, but
+WITHOUT ANY WARRANTY; without even the immplied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with ip-watcher; if not, write to the Free Software Foundation,
+Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
+
+=head1 BUGS
+
+=over 4
+
+=item *
+
+While running the ping command, ip-watcher will be placed into a
+sleeping state and not respond to signals. Possibly fixable through a
+refactoring of the pingCheck() subroutine to not use system() calls.
+
+=item *
+
+Relies upon the ping binary to do the heavy lifting work of the whole
+script. This is not portable, and should be really integrated into the
+heart of the script itself either through a CPAN module, or by being
+written directly into it.
+
+=item *
+
+The findPing() routine is not portable across non-POSIX architectures.
+
+=item *
+
+None of the signal handling routines are portable across non-POSIX
+architectures.
+
+=back
+
+=head1 SEE ALSO
+
+ping(8)
+
+=cut

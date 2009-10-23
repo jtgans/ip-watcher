@@ -1,0 +1,34 @@
+ip-watcher v0.1 -- Initial Release
+Created by June Tate-Gans <june@theonelab.com>
+Released on Friday, January 27th, 2006 at 12:04pm
+
+ip-watcher is a script written to count the frequencies of words found
+in the supplied filenames. So far, ip-watcher has been tested on the
+following operating systems: 
+
+          - Debian Linux
+          - MacOS X (10.4.4, specifically)
+
+ip-watcher requires version 5.8.6, but should (theoretically) work in
+any 5.8 perl interpreter. Microsoft-based systems may not work fully
+due to the intrinsic differences in signals implementations and
+pathnames.
+
+ip-watcher uses the following packages to do it's dirty work:
+
+           - Getopt::Long
+           - Mail::Mailer
+           - Sys::Syslog
+           - Sys::Hostname
+
+Most of these should be available with your perl interpreter, but if
+not, check with your friendly CPAN mirror. =o)
+
+In any case, most of the documentation is available in POD form in the
+ip-watcher file. In case you don't have access to perldoc (heaven
+forbid), I've converted the documentation into plaintext format in the
+file "perldoc.txt".
+
+Comments, suggestions, and flames are greatly anticipated. =o)
+
+     -- June

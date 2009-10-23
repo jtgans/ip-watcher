@@ -1,0 +1,125 @@
+IP-WATCHER(1)         User Contributed Perl Documentation        IP-WATCHER(1)
+
+
+
+NNAAMMEE
+       ip-watcher - watch the status of an IP address and notify the user of
+       it's status.
+
+SSYYNNOOPPSSIISS
+       ip-watcher <options> <ip-address> <email-address>
+
+       See below for more information on the various switches available.
+
+UUSSAAGGEE
+        # Typical usage -- watch 127.0.0.1 and notify jbraum@music.org
+        $ ip-watcher 127.0.0.1 jbraum@music.org
+
+DDEESSCCRRIIPPTTIIOONN
+       This script will watch the status of an IP address and notify the user
+       when it has gone up or down. ip-watcher can be configured to notify the
+       user when the IP address to monitor has been down or up for N number of
+       checks. Additionally, this script is designed to be run as a daemon. As
+       such, it will automatically fork into the background and monitor things
+       from there.
+
+       ip-watcher is also designed to log messages to the daemon syslog facil-
+       ity, thus freeing up your terminal from the messages it would otherwise
+       spew all over.
+
+       To shutdown ip-watcher from the daemonized state, simply send a kill
+       signal of SIGINT, SIGQUIT, SIGABRT, or SIGTERM. Please refrain from
+       using SIGKILL, as this is usually reserved for emergency system func-
+       tions, or shutdown needs and will not notify the user when it is being
+       shut down.
+
+OOPPTTIIOONNSS
+       --help
+           Show a quick bit of usage help.
+
+       --mail-from=<email-address>
+           Set the email address for the From: headers for all notifications.
+           If this is not specified on the command line, it defaults to
+           "ip-watcher".
+
+       --sleep-secs=<num>
+           Set the amount of time to sleep between ping checks. The default
+           when this is not specified is 5 seconds. NOTE: don't set this to 0
+           or you'll be very sorry. :)
+
+       --email-delay=<num>
+           Set the number of consecutive times that a ping must succeed or
+           fail before the user is notified of the state change. This is use-
+           ful as it helps to prevent "flapping" of notifications when a
+           server is going a bit nutty. Note that setting this value too high
+           can cause ip-watcher to not detect a true failure, and setting it
+           too low can annoy the heck out of the owner of the email address.
+           Defaults to a reasonable 5.
+
+       --daemonize
+       --no-daemonize
+           Toggle whether ip-watcher should fork into the background. The
+           default is to go ahead and daemonize. Note that specifying
+           --no-daemonize on the command line will result in all log messages
+           going to the terminal, as logging all that cruft to syslog while
+           running in the foreground is mostly pointless.
+
+       --syslogging
+       --no-syslogging
+           Toggle whether or not ip-watcher should log it's output to the sys-
+           log or to stdout instead. This allows you to have ip-watcher run-
+           ning as a daemon and yet still output log messages to your terminal
+           if you need to debug something. Mostly useful to developers only.
+           Defaults to syslogging, unless --no-daemonize is specified, which
+           implies --no-syslogging.
+
+       --ping=<filename>
+           The fully qualified pathname to the ping utility. If this is not
+           specified, ip-watcher will attempt to guess at where ping is by
+           scanning the PATH environment variable. Note that this program must
+           be executable by the user ip-watcher runs as, and must accept the
+           -c command line parameter (count).
+
+CCOOPPYYRRIIGGHHTT
+       Copyright(C) 2006, June R. Tate-Gans <june@theonelab.com>
+
+LLIICCEENNSSEE
+       This file is a part of ip-watcher.
+
+       ip-watcher is free software; you can redistribute it and/or modify it
+       under the terms of the GNU General Public License as published by the
+       Free Software Foundation; either version 2 of the License, or (at your
+       option) any later version.
+
+       ip-watcher is distributed in the hope that it will be useful, but WITH-
+       OUT ANY WARRANTY; without even the immplied warranty of MERCHANTABILITY
+       or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License
+       for more details.
+
+       You should have received a copy of the GNU General Public License along
+       with ip-watcher; if not, write to the Free Software Foundation, Inc.,
+       59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
+
+BBUUGGSS
+       +o   While running the ping command, ip-watcher will be placed into a
+           sleeping state and not respond to signals. Possibly fixable through
+           a refactoring of the _p_i_n_g_C_h_e_c_k_(_) subroutine to not use _s_y_s_t_e_m_(_)
+           calls.
+
+       +o   Relies upon the ping binary to do the heavy lifting work of the
+           whole script. This is not portable, and should be really integrated
+           into the heart of the script itself either through a CPAN module,
+           or by being written directly into it.
+
+       +o   The _f_i_n_d_P_i_n_g_(_) routine is not portable across non-POSIX architec-
+           tures.
+
+       +o   None of the signal handling routines are portable across non-POSIX
+           architectures.
+
+SSEEEE AALLSSOO
+       _p_i_n_g(8)
+
+
+
+perl v5.8.6                       2006-01-28                     IP-WATCHER(1)
